@@ -11,7 +11,7 @@ const getAllVideos=asynchandler(async(req,res)=>{
         {
             isPublished:true,
         }
-    );
+    ) .populate("owner", "fullname username avatar");
     if(allVideos.length==0){
         throw new ApiError(
             404, " No videos available"
