@@ -35,7 +35,7 @@ router.route("/current-user").get(verifyJWT, getCurrentuser);
 router.route("/update-account").patch(verifyJWT, updateAccountdetails);
 router.route("/avatar").patch(verifyJWT, upload.single("avatar"), updateUserAvatar);
 router.route("/cover-image").patch(verifyJWT, upload.single("coverImage"), updateUserCoverImage);
-router.route("/c/:username").get(verifyJWT, getUserChannelProfile);
+router.route("/:username").get(verifyJWT, getUserChannelProfile);
 router.route("/history").get(verifyJWT, getWatchHistory);
 router.route("/addToWatchHistory/:videoId").post(verifyJWT,addToWatchHistory);
 router.route("/clearWatchHistory").delete(verifyJWT,clearWatchHistory);
