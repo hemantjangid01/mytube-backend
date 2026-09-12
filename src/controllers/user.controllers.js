@@ -347,7 +347,7 @@ const updateUserCoverImage=asynchandler(async(req,res)=>{
         req.user?._id,
         {
             $set:{
-                coverImage:coverImage.url
+                covermage:coverImage.url
             }
 
         },
