@@ -8,7 +8,7 @@ import { video } from "../models/video.model.js";
 const createPlaylist = asynchandler(async (req, res) => {
     const {name, description} = req.body;
     const userId=req.user._id;
-     if(!description.trim()||!name.trim()||!userId.trim()){
+     if(!description.trim()||!name.trim()||!userId){
         throw new ApiError(400, "invalid parameters");
 
     }
