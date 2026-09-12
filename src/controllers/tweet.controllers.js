@@ -175,7 +175,7 @@ const deleteTweet = asynchandler(async (req, res) => {
                 )
             }
 
-            tweet.deleteOne();
+            await tweet.deleteOne();
             
 
 
