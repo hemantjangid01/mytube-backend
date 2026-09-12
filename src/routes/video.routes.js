@@ -33,7 +33,7 @@ router.route("/").get(getAllVideos);
 
 
 
-    router
+ router
     .route("/channel/:username")
     .get(getChannelVideos);
 
