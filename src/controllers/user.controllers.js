@@ -273,6 +273,17 @@ const updateAccountdetails=asynchandler(async(req,res)=>{
         throw new ApiError(400,"all fields are required")
     }
     console.log("ok h ");
+    const existingUser = await user.findOne({
+    email: email.trim().toLowerCase(),
+    _id: { $ne: req.user._id }
+});
+
+if (existingUser) {
+    throw new ApiError(
+        409,
+        "User with this email already exists"
+    );
+}
 
      const updatedUser=await user.findByIdAndUpdate( 
         req.user?._id,
