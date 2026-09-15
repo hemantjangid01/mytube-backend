@@ -122,29 +122,27 @@ const getVideoComments = asynchandler(async (req, res) => {
         })
         .sort({ createdAt: -1 });
 
-    // Separate parent comments and replies
     const parentComments = allComments.filter(
-        (comment) => !comment.parentComment
-    );
+    (comment) => !comment.parentComment
+);
 
-    const replies = allComments.filter(
-        (comment) => comment.parentComment
-    );
+const buildReplies = (parentId) => {
+    return allComments
+        .filter(
+            (comment) =>
+                comment.parentComment &&
+                comment.parentComment.toString() === parentId.toString()
+        )
+        .map((reply) => ({
+            ...reply.toObject(),
+            replies: buildReplies(reply._id)
+        }));
+};
 
-    // Attach replies to their parent comment
-    const comments = parentComments.map((comment) => {
-
-        const commentReplies = replies.filter(
-            (reply) =>
-                reply.parentComment.toString() ===
-                comment._id.toString()
-        );
-
-        return {
-            ...comment.toObject(),
-            replies: commentReplies
-        };
-    });
+const comments = parentComments.map((comment) => ({
+    ...comment.toObject(),
+    replies: buildReplies(comment._id)
+}));
 
     return res.status(200).json(
         new ApiResponse(
