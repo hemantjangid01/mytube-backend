@@ -163,33 +163,38 @@ const loginUser=asynchandler(async(req,res )=>{
 
 
 })
- const logOutUser=asynchandler(async(req,res)=>{
+ const logOutUser = asynchandler(async (req, res) => {
 
     await user.findByIdAndUpdate(
-
-    req.user._id,
-
-    
-    {
-        $unset:{
-            refreshToken:undefined
+        req.user._id,
+        {
+            $unset: {
+                refreshToken: 1
+            }
         },
-        
-    },
-    {
-            new:true
+        {
+            new: true
         }
-    )
-     const options={
-        httpOnly:true,
-        secure:true,
+    );
 
-     }
-     return res.status(200)
-     .clearCookie("accessToken",options)
-     .clearCookie("refreshToken",options)
-     .json(new ApiResponse(200,{},"user logged out"))
- })
+    const options = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+    };
+
+    return res
+        .status(200)
+        .clearCookie("accessToken", options)
+        .clearCookie("refreshToken", options)
+        .json(
+            new ApiResponse(
+                200,
+                {},
+                "user logged out"
+            )
+        );
+});
 const refreshAccessToken=asynchandler(async(req,res)=>{
     const incomingrefreshToken=req.cookies.refreshToken||req.body.refreshToken
 
