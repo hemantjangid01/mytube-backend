@@ -58,10 +58,14 @@ const registerUser=asynchandler(async(req,res)=>{
   
 
     let coverImageLocalpath;
-    if(req.files && Array.isArray(req.files.coverImage)&& req.files.coverImage.length>0){
-        coverImageLocalpath=req.files?.coverImage[0]?.path;
 
-    }
+if (
+    req.files &&
+    Array.isArray(req.files.coverimage) &&
+    req.files.coverimage.length > 0
+) {
+    coverImageLocalpath = req.files.coverimage[0].path;
+}
     if(!avatarLocalpath){
         throw new ApiError(400,"avatar required")
     }
@@ -272,7 +276,7 @@ const getCurrentuser=asynchandler(async(req,res)=>{
     .status(200)
     .json( new ApiResponse(200,  req.user,"current user fetched successfully"))
 })
-const updateAccountdetails=asynchandler(async(req,res)=>{
+const updateAccountdetails=asynchandler(async(req,res)=>{ 
     const{fullname,email}=req.body;
     if(!fullname||!email){
         throw new ApiError(400,"all fields are required")
