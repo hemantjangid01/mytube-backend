@@ -8,7 +8,7 @@ const router=Router();
 
 router.route("/addComment/:videoId").post(verifyJWT, addComment);
 router.route("/removeComment/:commentId").delete(verifyJWT,removeComment);
-router.route("/getVideoComments/:videoId").get(verifyJWT,getVideoComments);
+router.route("/getVideoComments/:videoId").get(getVideoComments);
 router.route("/updateComment/:commentId").patch(verifyJWT,updateComment);
 router.route("/replyComment/:commentId").post(verifyJWT,replyComment);
 
