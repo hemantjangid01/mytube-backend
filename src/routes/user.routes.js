@@ -5,11 +5,25 @@ import { addToWatchHistory, changePassword, clearWatchHistory, forgotPassword, g
       updateUserCoverImage } from "../controllers/user.controllers.js";
 import { upload } from "../middlewares/multer.middleware.js";
 import { verifyJWT } from "../middlewares/auth.middleware.js";
+import { rateLimiter } from "../middlewares/rateLimiter.middleware.js";
 
 const router = Router();
-getWatchHistory,
+
+  const authLimiter = rateLimiter({
+  windowSeconds: 15 * 60,
+  maxRequests: 10,
+  keyPrefix: "auth",
+});
+
+const otpLimiter = rateLimiter({
+  windowSeconds: 15 * 60,
+  maxRequests: 5,
+  keyPrefix: "otp",
+});
+
     
 router.route("/register").post(
+    authLimiter,
 
     upload.fields([
 
@@ -27,7 +41,8 @@ router.route("/register").post(
 
     ]),
     registerUser)
-router.route("/login").post(loginUser)
+
+router.route("/login").post(authLimiter,loginUser)
 router.route("/logout").post(verifyJWT, logOutUser)
 router.route("/refresh_token").post(refreshAccessToken);
 router.route("/change-password").post(verifyJWT, changePassword);
@@ -40,8 +55,8 @@ router.route("/addToWatchHistory/:videoId").post(verifyJWT,addToWatchHistory);
 router.route("/clearWatchHistory").delete(verifyJWT,clearWatchHistory);
 router.route("/getWatchHistory").get(verifyJWT,getWatchHistory);
 router.route("/:username").get(verifyJWT, getUserChannelProfile);
-router.route("/forgot-password").post(forgotPassword);
-router.route("/reset-password").post(resetPassword);
+router.route("/forgot-password").post(otpLimiter,forgotPassword);
+router.route("/reset-password").post(otpLimiter,resetPassword);
 
 
     

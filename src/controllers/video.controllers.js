@@ -345,30 +345,53 @@ const getMyVideos = asynchandler(async (req, res) => {
         );
 });
 const getChannelVideos = asynchandler(async (req, res) => {
-    const { username } = req.params;
+  const { username } = req.params;
+  const normalizedUsername = username.toLowerCase();
 
+  const fetchChannelVideos = async () => {
     const channel = await user.findOne({
-        username: username.toLowerCase(),
+      username: normalizedUsername,
     });
 
     if (!channel) {
-        throw new ApiError(404, "Channel not found");
+      throw new ApiError(404, "Channel not found");
     }
 
-    const videos = await video
-        .find({
-            owner: channel._id,
-            isPublished: true,
-        })
-        .sort({ createdAt: -1 });
+    return await video
+      .find({
+        owner: channel._id,
+        isPublished: true,
+      })
+      .sort({ createdAt: -1 });
+  };
 
-    return res.status(200).json(
-        new ApiResponse(
-            200,
-            videos,
-            "channel videos fetched successfully"
-        )
+  const version = await getCacheVersion(
+    HOME_CACHE_VERSION_KEY
+  );
+
+  let videos;
+
+  if (version === null) {
+    // Redis unavailable: fetch directly from MongoDB.
+    videos = await fetchChannelVideos();
+  } else {
+    const cacheKey =
+      `cache:videos:channel:${normalizedUsername}:v${version}`;
+
+    videos = await getOrSetCache(
+      cacheKey,
+      fetchChannelVideos,
+      60
     );
+  }
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      videos,
+      "Channel videos fetched successfully"
+    )
+  );
 });
 
   export{
