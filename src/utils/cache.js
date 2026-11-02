@@ -1,18 +1,22 @@
 
 import redisClient from "../db/redis.js";
 
-// Read cached data or fetch it from MongoDB.
 export const getOrSetCache = async (
   key,
   fetchData,
-  ttlSeconds = 60
+  ttlSeconds = 30
 ) => {
   try {
     const cachedData = await redisClient.get(key);
 
     if (cachedData !== null) {
-      console.log("REDIS CACHE HIT:", key);
-      return JSON.parse(cachedData);
+      try {
+        console.log("REDIS CACHE HIT:", key);
+        return JSON.parse(cachedData);
+      } catch {
+        console.error("Invalid cached JSON:", key);
+        await redisClient.del(key);
+      }
     }
   } catch (error) {
     console.error("Redis cache read failed:", error.message);
@@ -20,7 +24,6 @@ export const getOrSetCache = async (
 
   console.log("REDIS CACHE MISS:", key);
 
-  // MongoDB remains the source of truth.
   const data = await fetchData();
 
   try {
@@ -36,18 +39,12 @@ export const getOrSetCache = async (
   return data;
 };
 
-// Get the current version of a cache.
 export const getCacheVersion = async (versionKey) => {
   try {
     let version = await redisClient.get(versionKey);
 
     if (version === null) {
-      await redisClient.set(
-        versionKey,
-        "1",
-        { NX: true }
-      );
-
+      await redisClient.set(versionKey, "1", { NX: true });
       version = await redisClient.get(versionKey);
     }
 
@@ -58,12 +55,16 @@ export const getCacheVersion = async (versionKey) => {
   }
 };
 
-// Incrementing the version makes previous cache entries obsolete.
 export const invalidateCacheVersion = async (versionKey) => {
   try {
     await redisClient.incr(versionKey);
     console.log("CACHE INVALIDATED:", versionKey);
+    return true;
   } catch (error) {
-    console.error("Cache invalidation failed:", error.message);
+    console.error(
+      "Cache invalidation failed:",
+      error.message
+    );
+    return false;
   }
 };

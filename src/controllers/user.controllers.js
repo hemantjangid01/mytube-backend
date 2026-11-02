@@ -9,16 +9,15 @@ import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import jwt from "jsonwebtoken";
 import { video } from "../models/video.model.js";
 import redisClient from "../db/redis.js";
+ 
 import {
   createHash,
-  randomInt,
-  randomUUID,
-  timingSafeEqual,
+  randomInt
 } from "node:crypto"; 
-import sendEmail from "../utils/sendEmail.js";
+
 import { emailQueue } from "../queues/email.queue.js";
 
-
+import { encryptEmailPayload } from "../utils/emailEncryption.js";
 
 const incrementWindowCounter = async (key, windowSeconds) => {
   const count = await redisClient.eval(
@@ -59,6 +58,7 @@ const enforceRateLimit = async (
 
 
 
+
 const forgotPassword = asynchandler(async (req, res) => {
   const email =
     typeof req.body.email === "string"
@@ -74,7 +74,6 @@ const forgotPassword = asynchandler(async (req, res) => {
   const responseMessage =
     "If an account exists with this email, an OTP has been sent.";
 
-  // Maximum 10 requests per IP in 15 minutes.
   await enforceRateLimit(
     `password-reset:request:ip:${ip}`,
     10,
@@ -82,7 +81,6 @@ const forgotPassword = asynchandler(async (req, res) => {
     "Too many OTP requests from this network. Try later."
   );
 
-  // Maximum 3 requests per email in 15 minutes.
   await enforceRateLimit(
     `password-reset:request:email:${email}`,
     3,
@@ -130,8 +128,7 @@ const forgotPassword = asynchandler(async (req, res) => {
   );
 
   try {
-    // Add email job to BullMQ.
-    await emailQueue.add("send-password-reset-otp", {
+    const encryptedPayload = encryptEmailPayload({
       to: email,
       subject: "MyTube Password Reset OTP",
       html: `
@@ -144,6 +141,12 @@ const forgotPassword = asynchandler(async (req, res) => {
         </div>
       `,
     });
+
+    await emailQueue.add(
+      "send-password-reset-otp",
+      { encryptedPayload }
+    );
+
   } catch (error) {
     console.error("FORGOT PASSWORD QUEUE ERROR:", error);
 
@@ -160,6 +163,7 @@ const forgotPassword = asynchandler(async (req, res) => {
     new ApiResponse(200, {}, responseMessage)
   );
 });
+
 
 
 

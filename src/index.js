@@ -1,10 +1,10 @@
-
 import "dotenv/config";
 
 import dns from "dns";
 import connectDB from "./db/index.js";
 import { connectRedis } from "./db/redis.js";
 import { app } from "./app.js";
+import { startEmailWorker } from "./workers/email.worker.js";
 
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
@@ -13,6 +13,9 @@ const startServer = async () => {
     await connectDB();
 
     await connectRedis();
+
+    // Start BullMQ worker in the same backend process.
+    startEmailWorker();
 
     app.on("error", (error) => {
       console.error("Express error:", error);
