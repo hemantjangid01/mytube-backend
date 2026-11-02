@@ -9,25 +9,88 @@ import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import jwt from "jsonwebtoken";
 import { video } from "../models/video.model.js";
 import redisClient from "../db/redis.js";
-import { createHash, randomInt } from "node:crypto"; 
+import {
+  createHash,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto"; 
 import sendEmail from "../utils/sendEmail.js";
 
 
 
+const incrementWindowCounter = async (key, windowSeconds) => {
+  const count = await redisClient.eval(
+    `
+      local count = redis.call("INCR", KEYS[1])
+
+      if count == 1 then
+        redis.call("EXPIRE", KEYS[1], ARGV[1])
+      end
+
+      return count
+    `,
+    {
+      keys: [key],
+      arguments: [String(windowSeconds)],
+    }
+  );
+
+  return Number(count);
+};
+
+const enforceRateLimit = async (
+  key,
+  limit,
+  windowSeconds,
+  message
+) => {
+  const count = await incrementWindowCounter(
+    key,
+    windowSeconds
+  );
+
+  if (count > limit) {
+    throw new ApiError(429, message);
+  }
+};
+
+
+
 const forgotPassword = asynchandler(async (req, res) => {
-  const email = req.body.email?.trim().toLowerCase();
+  const email =
+    typeof req.body.email === "string"
+      ? req.body.email.trim().toLowerCase()
+      : "";
 
   if (!email) {
     throw new ApiError(400, "Email is required");
   }
 
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+
   const responseMessage =
     "If an account exists with this email, an OTP has been sent.";
+
+  // Maximum 10 requests per IP in 15 minutes.
+  await enforceRateLimit(
+    `password-reset:request:ip:${ip}`,
+    10,
+    900,
+    "Too many OTP requests from this network. Try later."
+  );
+
+  // Maximum 3 requests per email in 15 minutes.
+  await enforceRateLimit(
+    `password-reset:request:email:${email}`,
+    3,
+    900,
+    "Too many OTP requests for this email. Try later."
+  );
 
   const cooldownKey = `password-reset:cooldown:${email}`;
   const otpKey = `password-reset:otp:${email}`;
 
-  // Allow only one OTP request per minute.
   const allowed = await redisClient.set(
     cooldownKey,
     "1",
@@ -42,17 +105,14 @@ const forgotPassword = asynchandler(async (req, res) => {
 
   const existingUser = await user.findOne({ email });
 
-  // Do not reveal whether an email is registered.
   if (!existingUser) {
     return res.status(200).json(
       new ApiResponse(200, {}, responseMessage)
     );
   }
 
-  // Generate a cryptographically secure six-digit OTP.
   const otp = randomInt(100000, 1000000).toString();
 
-  // Store the hash, never the actual OTP.
   const otpHash = createHash("sha256")
     .update(otp)
     .digest("hex");
@@ -62,6 +122,7 @@ const forgotPassword = asynchandler(async (req, res) => {
     JSON.stringify({
       userId: existingUser._id.toString(),
       otpHash,
+      tokenVersion: existingUser.tokenVersion ?? 0,
     }),
     { EX: 300 }
   );
@@ -80,14 +141,17 @@ const forgotPassword = asynchandler(async (req, res) => {
         </div>
       `,
     });
-  }  catch (error) {
-  console.error("FORGOT PASSWORD EMAIL ERROR:", error);
+  } catch (error) {
+    console.error("FORGOT PASSWORD EMAIL ERROR:", error);
 
-  await redisClient.del(otpKey);
-  await redisClient.del(cooldownKey);
+    await redisClient.del(otpKey);
+    await redisClient.del(cooldownKey);
 
-  throw new ApiError(502, "Unable to send OTP. Try again later.");
-}
+    throw new ApiError(
+      502,
+      "Unable to send OTP. Try again later."
+    );
+  }
 
   return res.status(200).json(
     new ApiResponse(200, {}, responseMessage)
@@ -95,98 +159,234 @@ const forgotPassword = asynchandler(async (req, res) => {
 });
 
 
+
+
 const resetPassword = asynchandler(async (req, res) => {
   const { email, otp, newPassword } = req.body;
 
-  const normalizedEmail = email?.trim().toLowerCase();
+  const normalizedEmail =
+    typeof email === "string"
+      ? email.trim().toLowerCase()
+      : "";
 
   if (!normalizedEmail || !otp || !newPassword) {
-    throw new ApiError(400, "Email, OTP and new password are required");
+    throw new ApiError(
+      400,
+      "Email, OTP and new password are required"
+    );
   }
 
   if (!/^\d{6}$/.test(String(otp))) {
     throw new ApiError(400, "Invalid OTP");
   }
 
-  if (newPassword.length < 8) {
-    throw new ApiError(400, "Password must be at least 8 characters");
+  if (
+    typeof newPassword !== "string" ||
+    newPassword.length < 8
+  ) {
+    throw new ApiError(
+      400,
+      "Password must be at least 8 characters"
+    );
   }
 
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+
+  // Overall verification limits.
+  await enforceRateLimit(
+    `password-reset:verify:ip:${ip}`,
+    20,
+    900,
+    "Too many reset attempts from this network. Try later."
+  );
+
+  await enforceRateLimit(
+    `password-reset:verify:email:${normalizedEmail}`,
+    10,
+    900,
+    "Too many reset attempts for this email. Try later."
+  );
+
   const otpKey = `password-reset:otp:${normalizedEmail}`;
-  const attemptsKey = `password-reset:attempts:${normalizedEmail}`;
+  const attemptsEmailKey =
+    `password-reset:attempts:email:${normalizedEmail}`;
+  const attemptsIpKey =
+    `password-reset:attempts:ip:${ip}`;
+  const lockKey =
+    `password-reset:lock:${normalizedEmail}`;
 
   const storedData = await redisClient.get(otpKey);
 
   if (!storedData) {
-    throw new ApiError(400, "OTP expired or invalid. Request a new OTP.");
+    throw new ApiError(
+      400,
+      "OTP expired or invalid. Request a new OTP."
+    );
   }
 
-  const { userId, otpHash: storedHash } = JSON.parse(storedData);
+  let otpData;
+
+  try {
+    otpData = JSON.parse(storedData);
+  } catch {
+    await redisClient.del(otpKey);
+    throw new ApiError(400, "Invalid OTP data");
+  }
+
+  const {
+    userId,
+    otpHash: storedHash,
+    tokenVersion: storedTokenVersion = 0,
+  } = otpData;
+
+  if (
+    typeof storedHash !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(storedHash)
+  ) {
+    await redisClient.del(otpKey);
+    throw new ApiError(400, "Invalid OTP data");
+  }
 
   const submittedHash = createHash("sha256")
     .update(String(otp))
     .digest("hex");
 
-  if (submittedHash !== storedHash) {
-    const attempts = await redisClient.incr(attemptsKey);
+  const isOtpCorrect = timingSafeEqual(
+    Buffer.from(submittedHash, "hex"),
+    Buffer.from(storedHash, "hex")
+  );
 
-    if (attempts === 1) {
-      await redisClient.expire(attemptsKey, 300);
-    }
+  if (!isOtpCorrect) {
+    const emailAttempts = await incrementWindowCounter(
+      attemptsEmailKey,
+      300
+    );
 
-    if (attempts >= 5) {
+    const ipAttempts = await incrementWindowCounter(
+      attemptsIpKey,
+      300
+    );
+
+    if (emailAttempts >= 5 || ipAttempts >= 20) {
       await redisClient.del(otpKey);
-      await redisClient.del(attemptsKey);
-      throw new ApiError(429, "Too many incorrect attempts. Request a new OTP.");
+      await redisClient.del(attemptsEmailKey);
+      await redisClient.del(attemptsIpKey);
+
+      throw new ApiError(
+        429,
+        "Too many incorrect OTP attempts. Request a new OTP."
+      );
     }
 
     throw new ApiError(400, "Incorrect OTP");
   }
 
-  // Atomically consume the OTP so it cannot be reused.
-  const consumed = await redisClient.eval(
-    `
-      local value = redis.call("GET", KEYS[1])
+  // Acquire a short-lived lock to prevent simultaneous resets.
+  const lockValue = randomUUID();
 
-      if not value then
-        return 0
-      end
+  const lockAcquired = await redisClient.set(
+    lockKey,
+    lockValue,
+    { EX: 30, NX: true }
+  );
 
-      local data = cjson.decode(value)
+  if (!lockAcquired) {
+    throw new ApiError(
+      409,
+      "Password reset is already being processed. Try again."
+    );
+  }
 
-      if data.otpHash ~= ARGV[1] then
-        return 0
-      end
+  let passwordSaved = false;
 
-      redis.call("DEL", KEYS[1])
-      redis.call("DEL", KEYS[2])
+  try {
+    const existingUser = await user.findById(userId);
 
-      return 1
-    `,
-    {
-      keys: [otpKey, attemptsKey],
-      arguments: [submittedHash],
+    if (!existingUser) {
+      await redisClient.del(otpKey);
+      throw new ApiError(404, "User does not exist");
     }
-  );
 
-  if (consumed !== 1) {
-    throw new ApiError(400, "OTP expired or already used");
+    // Reject an OTP from an earlier password/session version.
+    if (
+      (existingUser.tokenVersion ?? 0) !==
+      Number(storedTokenVersion)
+    ) {
+      await redisClient.del(otpKey);
+
+      throw new ApiError(
+        400,
+        "OTP has already been used. Request a new OTP."
+      );
+    }
+
+    // Save password and invalidate sessions in one MongoDB document save.
+    existingUser.password = newPassword;
+    existingUser.tokenVersion =
+      (existingUser.tokenVersion ?? 0) + 1;
+
+    existingUser.refreshToken = undefined;
+
+    // The Mongoose pre-save hook hashes the new password.
+    await existingUser.save();
+
+    passwordSaved = true;
+
+    // Delete OTP and counters only after MongoDB successfully saves.
+    // Delete the lock only if this request still owns it.
+    await redisClient.eval(
+      `
+        if redis.call("GET", KEYS[4]) == ARGV[1] then
+          redis.call("DEL", KEYS[1])
+          redis.call("DEL", KEYS[2])
+          redis.call("DEL", KEYS[3])
+          redis.call("DEL", KEYS[4])
+          return 1
+        end
+
+        return 0
+      `,
+      {
+        keys: [
+          otpKey,
+          attemptsEmailKey,
+          attemptsIpKey,
+          lockKey,
+        ],
+        arguments: [lockValue],
+      }
+    );
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {},
+        "Password reset successfully. Please login again."
+      )
+    );
+  } catch (error) {
+    // If MongoDB did not save, preserve the OTP for a retry.
+    // Release only the lock owned by this request.
+    if (!passwordSaved) {
+      await redisClient.eval(
+        `
+          if redis.call("GET", KEYS[1]) == ARGV[1] then
+            return redis.call("DEL", KEYS[1])
+          end
+
+          return 0
+        `,
+        {
+          keys: [lockKey],
+          arguments: [lockValue],
+        }
+      );
+    }
+
+    throw error;
   }
-
-  const existingUser = await user.findById(userId);
-
-  if (!existingUser) {
-    throw new ApiError(404, "User does not exist");
-  }
-
-  // Existing Mongoose pre-save hook hashes this password.
-  existingUser.password = newPassword;
-  await existingUser.save();
-
-  return res.status(200).json(
-    new ApiResponse(200, {}, "Password reset successfully")
-  );
 });
+
 
 const generateaccesandrefreshtoken=async(userid)=>{
     try {
@@ -431,22 +631,70 @@ const refreshAccessToken=asynchandler(async(req,res)=>{
 
 
 })
-const changePassword=asynchandler(async(req,res)=>{
-    const {oldPassword,newPassword}=req.body;
 
-    const uuser=await user.findById(req.user?._id)
-    const ispasswordcorrect=uuser.ispasswordcorrect(oldPassword)
-    if(!ispasswordcorrect){
-        throw new ApiError(404,"invalid old password")
-    }
+const changePassword = asynchandler(async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
 
-            uuser.password=newPassword
-            await uuser.save({validateBeforeSave:false})
+  if (!oldPassword || !newPassword) {
+    throw new ApiError(
+      400,
+      "Old password and new password are required"
+    );
+  }
 
-            return res.status(200)
-            .json( new ApiResponse(200,{},"password changed successfully"))
-            
-})
+  if (newPassword.length < 8) {
+    throw new ApiError(
+      400,
+      "New password must contain at least 8 characters"
+    );
+  }
+
+  const currentUser = await user.findById(req.user._id);
+
+  if (!currentUser) {
+    throw new ApiError(404, "User does not exist");
+  }
+
+  const isPasswordCorrect =
+    await currentUser.ispasswordcorrect(oldPassword);
+
+  if (!isPasswordCorrect) {
+    throw new ApiError(400, "Invalid old password");
+  }
+
+  if (oldPassword === newPassword) {
+    throw new ApiError(
+      400,
+      "New password must be different from old password"
+    );
+  }
+
+  currentUser.password = newPassword;
+  currentUser.tokenVersion =
+    (currentUser.tokenVersion ?? 0) + 1;
+  currentUser.refreshToken = undefined;
+
+  await currentUser.save();
+
+  const cookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+  };
+
+  return res
+    .status(200)
+    .clearCookie("accessToken", cookieOptions)
+    .clearCookie("refreshToken", cookieOptions)
+    .json(
+      new ApiResponse(
+        200,
+        {},
+        "Password changed successfully. Please login again."
+      )
+    );
+});
+
 const getCurrentuser=asynchandler(async(req,res)=>{
     
     
