@@ -16,6 +16,7 @@ import {
   timingSafeEqual,
 } from "node:crypto"; 
 import sendEmail from "../utils/sendEmail.js";
+import { emailQueue } from "../queues/email.queue.js";
 
 
 
@@ -54,6 +55,7 @@ const enforceRateLimit = async (
     throw new ApiError(429, message);
   }
 };
+
 
 
 
@@ -128,7 +130,8 @@ const forgotPassword = asynchandler(async (req, res) => {
   );
 
   try {
-    await sendEmail({
+    // Add email job to BullMQ.
+    await emailQueue.add("send-password-reset-otp", {
       to: email,
       subject: "MyTube Password Reset OTP",
       html: `
@@ -142,14 +145,14 @@ const forgotPassword = asynchandler(async (req, res) => {
       `,
     });
   } catch (error) {
-    console.error("FORGOT PASSWORD EMAIL ERROR:", error);
+    console.error("FORGOT PASSWORD QUEUE ERROR:", error);
 
     await redisClient.del(otpKey);
     await redisClient.del(cooldownKey);
 
     throw new ApiError(
-      502,
-      "Unable to send OTP. Try again later."
+      503,
+      "Unable to queue OTP email. Try again later."
     );
   }
 
@@ -157,6 +160,7 @@ const forgotPassword = asynchandler(async (req, res) => {
     new ApiResponse(200, {}, responseMessage)
   );
 });
+
 
 
 
