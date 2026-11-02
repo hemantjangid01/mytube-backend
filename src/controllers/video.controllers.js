@@ -4,95 +4,105 @@ import { ApiError } from "../utils/apierror.js";
 import { ApiResponse } from "../utils/apiresponse.js";
 import { asynchandler } from "../utils/asynchandler.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
+import {
+  getOrSetCache,
+  getCacheVersion,
+  invalidateCacheVersion,
+} from "../utils/cache.js";
 import mongoose from "mongoose";
 
-const getAllVideos=asynchandler(async(req,res)=>{
-    const allVideos= await video.find(
-        {
-            isPublished:true,
-        }
-    ) .populate("owner", "fullname username avatar");
-    if(allVideos.length==0){
-        throw new ApiError(
-            404, " No videos available"
-        )
-    }
+const HOME_CACHE_VERSION_KEY = "cache:videos:home:version";
 
-    return res.status(200)
-    .json(
-        new ApiResponse(
-            200,allVideos," All videos are fetched successfully "
-        )
+
+
+const getAllVideos = asynchandler(async (req, res) => {
+  const version = await getCacheVersion(
+    HOME_CACHE_VERSION_KEY
+  );
+
+  const fetchVideos = async () => {
+    return await video.find({
+      isPublished: true,
+    }).populate(
+      "owner",
+      "fullname username avatar"
+    );
+  };
+
+  let allVideos;
+
+  if (version === null) {
+    // Redis unavailable: directly query MongoDB.
+    allVideos = await fetchVideos();
+  } else {
+    const cacheKey = `cache:videos:home:v${version}`;
+
+    allVideos = await getOrSetCache(
+      cacheKey,
+      fetchVideos,
+      60
+    );
+  }
+
+  if (allVideos.length === 0) {
+    throw new ApiError(404, "No videos available");
+  }
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      allVideos,
+      "All videos are fetched successfully"
     )
-})
-
-const publishVideo=asynchandler(async(req,res)=>{
-    const videoData=req.body;
-    const mediaFiles=req.files;
-    if(!videoData){
-        throw new ApiError(400,"No video credentials found");
-    }
-    if(!mediaFiles){
-        throw new ApiError(400,"NO thumbnail and Video found");
-    }
-
-    const {description,title}=videoData;
-
-    if(!title?.trim()||!description?.trim()){
-        throw new ApiError(400,"Title and Description are required");
-
-    }
-
-    const thumbnailPath=mediaFiles?.thumbnail?.[0]?.path;
-
-    if(!thumbnailPath){
-        throw new ApiError(
-            400,"Thumbnail is required"
-        )
-    }
-    const uploadedThumbnail=await uploadOnCloudinary(thumbnailPath);
-    if(!uploadedThumbnail){
-        throw new ApiError(500,"Error while uploading thumbnail")
-    }
-
-    const videoFilePath=mediaFiles?.videoFile?.[0]?.path;
-    if(!videoFilePath){
-        throw new ApiError(400,"Invalid video File path");
-    }
+  );
+});
 
 
-    const uploadedVideo=await uploadOnCloudinary(videoFilePath);
-     if(!uploadedVideo){
-        throw new ApiError(500,"Error Occured While Uploading");
+const publishVideo = asynchandler(async (req, res) => {
+  const { title, description } = req.body;
 
-     }
+  if (!title || !description) {
+    throw new ApiError(400, "Title and description are required");
+  }
 
-     const savedVideo=await video.create({
+  const videoLocalPath = req.files?.videoFile?.[0]?.path;
+  const thumbnailLocalPath = req.files?.thumbnail?.[0]?.path;
 
-        videoFile:uploadedVideo.url,
-        thumbnail:uploadedThumbnail.url,
-        title,
-        description,
-        duration:uploadedVideo.duration,
-        owner:req.user._id
-     })
+  if (!videoLocalPath || !thumbnailLocalPath) {
+    throw new ApiError(400, "Video file and thumbnail are required");
+  }
 
-     
+  const videoFile = await uploadOnCloudinary(videoLocalPath);
+  const thumbnail = await uploadOnCloudinary(thumbnailLocalPath);
 
+  if (!videoFile?.url) {
+    throw new ApiError(500, "Video upload failed");
+  }
 
-     
+  if (!thumbnail?.url) {
+    throw new ApiError(500, "Thumbnail upload failed");
+  }
 
+  const savedVideo = await video.create({
+    videoFile: videoFile.url,
+    thumbnail: thumbnail.url,
+    title,
+    description,
+    duration: videoFile.duration,
+    owner: req.user._id,
+  });
 
-     return res.status(201)
-     .json(
-        new ApiResponse(
-            201,
-            savedVideo,
-            "video uploaded successfully"
-        )
-     )
-    
-})
+  // Invalidate Home feed cache after successful database save.
+  await invalidateCacheVersion(HOME_CACHE_VERSION_KEY);
+
+  return res.status(201).json(
+    new ApiResponse(
+      201,
+      savedVideo,
+      "Video published successfully"
+    )
+  );
+});
 
 const getVideoById=asynchandler(async(req,res)=>{
     const { videoId }=req.params;
@@ -126,166 +136,160 @@ const getVideoById=asynchandler(async(req,res)=>{
     
 })
 
-const updateVideo=asynchandler(async(req,res)=>{
+const updateVideo = asynchandler(async (req, res) => {
+  const { videoId } = req.params;
 
-    const{ videoId }=req.params;
+  if (!mongoose.Types.ObjectId.isValid(videoId)) {
+    throw new ApiError(400, "Invalid video id");
+  }
 
-    if(!mongoose.Types.ObjectId.isValid(videoId)){
-        throw new ApiError(
-            400,"Videoid is required"
-        )}
-        const targetVideo = await video.findById(videoId);
+  const targetVideo = await video.findById(videoId);
 
-        if (!targetVideo) {
-         throw new ApiError(404, "video not found");
-}
+  if (!targetVideo) {
+    throw new ApiError(404, "Video not found");
+  }
 
-        if (targetVideo.owner.toString() !== req.user._id.toString()) {
-        throw new ApiError(
-        403,
-        "You are not allowed to update this video"
+  if (targetVideo.owner.toString() !== req.user._id.toString()) {
+    throw new ApiError(
+      403,
+      "You are not allowed to update this video"
     );
-}
+  }
 
-        const { description,title}=req.body;
+  const { description, title } = req.body;
 
-        const thumbnailPath=req.files?.thumbnail?.[0]?.path;
-        let uploadedThumbnail=null;
+  const thumbnailPath = req.files?.thumbnail?.[0]?.path;
+  let uploadedThumbnail = null;
 
-        if(thumbnailPath){
-            uploadedThumbnail=await uploadOnCloudinary(thumbnailPath);
-            
-        }
-        const updateData={};
-        if(title?.trim()){
-            updateData.title=title;
-        }
-        if(description?.trim()){
-            updateData.description=description;
-        }
+  if (thumbnailPath) {
+    uploadedThumbnail = await uploadOnCloudinary(thumbnailPath);
 
-        if(uploadedThumbnail){
-            updateData.thumbnail=uploadedThumbnail?.url
+    if (!uploadedThumbnail?.url) {
+      throw new ApiError(500, "Thumbnail upload failed");
+    }
+  }
 
-        }
+  const updateData = {};
 
-        
+  if (title?.trim()) {
+    updateData.title = title.trim();
+  }
 
-        const updatedVideo= await video.findByIdAndUpdate(
-            videoId,
-            updateData,
-            {
-                new:true
-            }
-        );
+  if (description?.trim()) {
+    updateData.description = description.trim();
+  }
 
-        if(!updatedVideo){
-            throw new ApiError(404,"video not found");
-        }
+  if (uploadedThumbnail) {
+    updateData.thumbnail = uploadedThumbnail.url;
+  }
 
-        return res.status(200)
-        .json(
-            new ApiResponse(200,updatedVideo,"updation successful")
-        )
-        
+  if (Object.keys(updateData).length === 0) {
+    throw new ApiError(400, "No valid fields provided for update");
+  }
 
+  const updatedVideo = await video.findByIdAndUpdate(
+    videoId,
+    updateData,
+    { new: true, runValidators: true }
+  );
 
+  if (!updatedVideo) {
+    throw new ApiError(404, "Video not found");
+  }
 
+  // Invalidate cached Home feed.
+  await invalidateCacheVersion(HOME_CACHE_VERSION_KEY);
 
-
-})
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      updatedVideo,
+      "Video updated successfully"
+    )
+  );
+});
 const deleteVideo = asynchandler(async (req, res) => {
-    const { videoId } = req.params;
+  const { videoId } = req.params;
 
-    if (!mongoose.Types.ObjectId.isValid(videoId)) {
-        throw new ApiError(
-            400,
-            "Invalid video id"
-        );
-    }
+  if (!mongoose.Types.ObjectId.isValid(videoId)) {
+    throw new ApiError(400, "Invalid video id");
+  }
 
-    const targetVideo = await video.findById(videoId);
+  const targetVideo = await video.findById(videoId);
 
-    if (!targetVideo) {
-        throw new ApiError(
-            404,
-            "Video not found"
-        );
-    }
+  if (!targetVideo) {
+    throw new ApiError(404, "Video not found");
+  }
 
-    if (
-        targetVideo.owner.toString() !==
-        req.user._id.toString()
-    ) {
-        throw new ApiError(
-            403,
-            "You are not allowed to delete this video"
-        );
-    }
-
-    await video.findByIdAndDelete(videoId);
-
-    return res.status(200).json(
-        new ApiResponse(
-            200,
-            {},
-            "Video deleted successfully"
-        )
+  if (targetVideo.owner.toString() !== req.user._id.toString()) {
+    throw new ApiError(
+      403,
+      "You are not allowed to delete this video"
     );
+  }
+
+  await video.findByIdAndDelete(videoId);
+
+  // Invalidate cached Home feed.
+  await invalidateCacheVersion(HOME_CACHE_VERSION_KEY);
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {},
+      "Video deleted successfully"
+    )
+  );
 });
 
-const togglePublishedStatus=asynchandler(async(req,res)=>{
-     const{ videoId }=req.params;
+const togglePublishedStatus = asynchandler(async (req, res) => {
+  const { videoId } = req.params;
 
-    if(!mongoose.Types.ObjectId.isValid(videoId)){
-        throw new ApiError(
-            400,"Videoid is required"
-        )}
+  if (!mongoose.Types.ObjectId.isValid(videoId)) {
+    throw new ApiError(400, "Invalid video id");
+  }
 
-        const targetVideo=await video.findById(videoId);
+  const targetVideo = await video.findById(videoId);
 
-        if(!targetVideo){
-            throw new ApiError(404,"video not found");
+  if (!targetVideo) {
+    throw new ApiError(404, "Video not found");
+  }
 
-        }
-        if (targetVideo.owner.toString() !== req.user._id.toString()) {
-              throw new ApiError(
-                403,
-                "You are not allowed to change this video's publish status"
-                 );
-}
-        
+  if (targetVideo.owner.toString() !== req.user._id.toString()) {
+    throw new ApiError(
+      403,
+      "You are not allowed to change this video's status"
+    );
+  }
 
-        
-            const updatedVideo=await video.findByIdAndUpdate(
-                videoId,
-                {
-                    isPublished:!targetVideo.isPublished
-                },{
-                    new:true
-                }
+  const updatedVideo = await video.findByIdAndUpdate(
+    videoId,
+    {
+      $set: {
+        isPublished: !targetVideo.isPublished,
+      },
+    },
+    {
+      new: true,
+      runValidators: true,
+    }
+  );
 
-            )
-        
+  if (!updatedVideo) {
+    throw new ApiError(404, "Video not found");
+  }
 
-        if(!updatedVideo){
-            throw new ApiError(500,"Error while updating toggle value")
-        }
+  // Invalidate cached Home feed.
+  await invalidateCacheVersion(HOME_CACHE_VERSION_KEY);
 
-        return res.status(200)
-        .json(new ApiResponse(
-            200,
-            updatedVideo,
-            "publish status  updated successfully"
-        ))
-        
-
-
-    
-    
-    
-
-})
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      updatedVideo,
+      `Video ${updatedVideo.isPublished ? "published" : "unpublished"} successfully`
+    )
+  );
+});
 const searchVideos = asynchandler(async (req, res) => {
     const { query } = req.query;
     if (!query || query.trim() === "") {
