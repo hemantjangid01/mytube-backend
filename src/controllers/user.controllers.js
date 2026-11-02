@@ -8,18 +8,197 @@ import { uploadOnCloudinary } from "../utils/cloudinary.js";
 
 import jwt from "jsonwebtoken";
 import { video } from "../models/video.model.js";
+import redisClient from "../db/redis.js";
+import { createHash, randomInt } from "node:crypto"; 
+import sendEmail from "../utils/sendEmail.js";
+
+
+
+const forgotPassword = asynchandler(async (req, res) => {
+  const email = req.body.email?.trim().toLowerCase();
+
+  if (!email) {
+    throw new ApiError(400, "Email is required");
+  }
+
+  const responseMessage =
+    "If an account exists with this email, an OTP has been sent.";
+
+  const cooldownKey = `password-reset:cooldown:${email}`;
+  const otpKey = `password-reset:otp:${email}`;
+
+  // Allow only one OTP request per minute.
+  const allowed = await redisClient.set(
+    cooldownKey,
+    "1",
+    { EX: 60, NX: true }
+  );
+
+  if (!allowed) {
+    return res.status(200).json(
+      new ApiResponse(200, {}, responseMessage)
+    );
+  }
+
+  const existingUser = await user.findOne({ email });
+
+  // Do not reveal whether an email is registered.
+  if (!existingUser) {
+    return res.status(200).json(
+      new ApiResponse(200, {}, responseMessage)
+    );
+  }
+
+  // Generate a cryptographically secure six-digit OTP.
+  const otp = randomInt(100000, 1000000).toString();
+
+  // Store the hash, never the actual OTP.
+  const otpHash = createHash("sha256")
+    .update(otp)
+    .digest("hex");
+
+  await redisClient.set(
+    otpKey,
+    JSON.stringify({
+      userId: existingUser._id.toString(),
+      otpHash,
+    }),
+    { EX: 300 }
+  );
+
+  try {
+    await sendEmail({
+      to: email,
+      subject: "MyTube Password Reset OTP",
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h2>MyTube Password Reset</h2>
+          <p>Your password reset OTP is:</p>
+          <h1 style="letter-spacing: 8px;">${otp}</h1>
+          <p>This OTP expires in 5 minutes.</p>
+          <p>If you did not request this, ignore this email.</p>
+        </div>
+      `,
+    });
+  }  catch (error) {
+  console.error("FORGOT PASSWORD EMAIL ERROR:", error);
+
+  await redisClient.del(otpKey);
+  await redisClient.del(cooldownKey);
+
+  throw new ApiError(502, "Unable to send OTP. Try again later.");
+}
+
+  return res.status(200).json(
+    new ApiResponse(200, {}, responseMessage)
+  );
+});
+
+
+const resetPassword = asynchandler(async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  const normalizedEmail = email?.trim().toLowerCase();
+
+  if (!normalizedEmail || !otp || !newPassword) {
+    throw new ApiError(400, "Email, OTP and new password are required");
+  }
+
+  if (!/^\d{6}$/.test(String(otp))) {
+    throw new ApiError(400, "Invalid OTP");
+  }
+
+  if (newPassword.length < 8) {
+    throw new ApiError(400, "Password must be at least 8 characters");
+  }
+
+  const otpKey = `password-reset:otp:${normalizedEmail}`;
+  const attemptsKey = `password-reset:attempts:${normalizedEmail}`;
+
+  const storedData = await redisClient.get(otpKey);
+
+  if (!storedData) {
+    throw new ApiError(400, "OTP expired or invalid. Request a new OTP.");
+  }
+
+  const { userId, otpHash: storedHash } = JSON.parse(storedData);
+
+  const submittedHash = createHash("sha256")
+    .update(String(otp))
+    .digest("hex");
+
+  if (submittedHash !== storedHash) {
+    const attempts = await redisClient.incr(attemptsKey);
+
+    if (attempts === 1) {
+      await redisClient.expire(attemptsKey, 300);
+    }
+
+    if (attempts >= 5) {
+      await redisClient.del(otpKey);
+      await redisClient.del(attemptsKey);
+      throw new ApiError(429, "Too many incorrect attempts. Request a new OTP.");
+    }
+
+    throw new ApiError(400, "Incorrect OTP");
+  }
+
+  // Atomically consume the OTP so it cannot be reused.
+  const consumed = await redisClient.eval(
+    `
+      local value = redis.call("GET", KEYS[1])
+
+      if not value then
+        return 0
+      end
+
+      local data = cjson.decode(value)
+
+      if data.otpHash ~= ARGV[1] then
+        return 0
+      end
+
+      redis.call("DEL", KEYS[1])
+      redis.call("DEL", KEYS[2])
+
+      return 1
+    `,
+    {
+      keys: [otpKey, attemptsKey],
+      arguments: [submittedHash],
+    }
+  );
+
+  if (consumed !== 1) {
+    throw new ApiError(400, "OTP expired or already used");
+  }
+
+  const existingUser = await user.findById(userId);
+
+  if (!existingUser) {
+    throw new ApiError(404, "User does not exist");
+  }
+
+  // Existing Mongoose pre-save hook hashes this password.
+  existingUser.password = newPassword;
+  await existingUser.save();
+
+  return res.status(200).json(
+    new ApiResponse(200, {}, "Password reset successfully")
+  );
+});
+
 const generateaccesandrefreshtoken=async(userid)=>{
     try {
         const uuser=await user.findById(userid);
         const accessToken= await uuser.generateAcessToken();
-        console.log("generated");
+        
         const refreshToken= await uuser.generateRefreshToken();
-        console.log("generated");
-
+        
         uuser.refreshToken=refreshToken;
-        console.log("generated0");
+
          await uuser.save({validateBeforeSave:false});
-         console.log("generated1");
+    
 
 
 
@@ -132,7 +311,6 @@ const loginUser=asynchandler(async(req,res )=>{
          throw new ApiError(404,"Invalid credentials")
     }
 
-    console.log("ok till here");
 
      const {accessToken,refreshToken}=await generateaccesandrefreshtoken(currUser._id);
       
@@ -204,7 +382,7 @@ const refreshAccessToken=asynchandler(async(req,res)=>{
 
     if(!incomingrefreshToken){
         throw new ApiError(
-            401,"unauthorised request   "
+            401,"unauthorised request"
         )
     }
 
@@ -246,7 +424,7 @@ const refreshAccessToken=asynchandler(async(req,res)=>{
           )
       )
   } catch (error) {
-    throw new ApiError(401,error?.message||"imvalid refresh token")
+    throw new ApiError(401,error?.message||"invalid refresh token")
     
   }
 
@@ -270,7 +448,7 @@ const changePassword=asynchandler(async(req,res)=>{
             
 })
 const getCurrentuser=asynchandler(async(req,res)=>{
-     console.log("ok h ");
+    
     
     return res
     .status(200)
@@ -631,6 +809,8 @@ export {
     getUserChannelProfile,
     getWatchHistory,
     addToWatchHistory,
-    clearWatchHistory
+    clearWatchHistory,
+    forgotPassword,
+    resetPassword
     
 }

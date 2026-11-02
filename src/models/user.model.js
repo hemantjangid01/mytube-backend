@@ -68,8 +68,6 @@ import bcrypt from "bcrypt";
  }
 
  userschema.methods.generateAcessToken=function(){
-    console.log("access");
-    
      return jwt.sign(
         {
             _id:this._id,

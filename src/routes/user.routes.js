@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { addToWatchHistory, changePassword, clearWatchHistory, getCurrentuser, getUserChannelProfile,
+import { addToWatchHistory, changePassword, clearWatchHistory, forgotPassword, getCurrentuser, getUserChannelProfile,
      getWatchHistory, loginUser, logOutUser, refreshAccessToken,
-      registerUser, updateAccountdetails, updateUserAvatar, 
+      registerUser, resetPassword, updateAccountdetails, updateUserAvatar, 
       updateUserCoverImage } from "../controllers/user.controllers.js";
 import { upload } from "../middlewares/multer.middleware.js";
 import { verifyJWT } from "../middlewares/auth.middleware.js";
@@ -40,7 +40,8 @@ router.route("/addToWatchHistory/:videoId").post(verifyJWT,addToWatchHistory);
 router.route("/clearWatchHistory").delete(verifyJWT,clearWatchHistory);
 router.route("/getWatchHistory").get(verifyJWT,getWatchHistory);
 router.route("/:username").get(verifyJWT, getUserChannelProfile);
-
+router.route("/forgot-password").post(forgotPassword);
+router.route("/reset-password").post(resetPassword);
 
 
     
